@@ -41,3 +41,4 @@ luac.out
 
 # Custom
 data/*.kn5
+logs/*.log

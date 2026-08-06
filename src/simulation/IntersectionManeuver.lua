@@ -31,6 +31,54 @@ local IntersectionManeuver = class('IntersectionManeuver', ManeuverBase, class.P
 
 local lastIndex = 0
 local _mrandom = math.random
+local feederHoldback = 0
+local roundaboutRightOffset = vec3()
+
+local function feederLogValue(value)
+  return tostring(value or '?'):gsub('[\r\n\t]', ' ')
+end
+
+local function appendFeederStallLog(item, reason)
+  if not TrafficPlannerFeederLogFilename then return end
+  local parts = {}
+  local function add(key, value)
+    parts[#parts + 1] = key..'='..feederLogValue(value)
+  end
+
+  local driver = item.guide:getDriver()
+  local exitClearance = item.toDef.lane:distanceToNextCar(item.toDef.to, driver.dimensions.front)
+  add('time', os.date('%Y-%m-%d %H:%M:%S'))
+  add('reason', reason)
+  add('stoppedFor', string.format('%.1f', item._feederStoppedFor))
+  add('speedKmh', string.format('%.2f', driver:getSpeedKmh()))
+  add('intersection', item.inter.name)
+  add('feeder', item.fromDef.lane.name)
+  add('output', item.toDef.lane.name)
+  add('distanceToEntry', string.format('%.2f', math.max(-item._inCurve, 0)))
+  add('curveLength', string.format('%.2f', item.curveInfo.curve.length))
+  add('exitClearance', string.format('%.2f', exitClearance))
+  add('mandatoryWait', string.format('%.2f', item._feederWaitTime))
+  add('exitBlocked', item._roundaboutExitBlocked)
+  add('engaged', item.inter.engaged.length)
+  add('traversing', item.inter.traversing.length)
+
+  for i = 1, item.inter.engaged.length do
+    local other = item.inter.engaged[i]
+    if other ~= item then
+      local otherDriver = other.guide:getDriver()
+      add('other'..i, string.format('%s,active=%s,feeder=%s,roundabout=%s,inCurve=%.2f,speed=%.2f,output=%s',
+        feederLogValue(other.fromDef.lane.name), tostring(other.active), tostring(other.fromDef.lane.feederLane),
+        tostring(other:isRoundaboutFlow()), other._inCurve, otherDriver:getSpeedKmh(), feederLogValue(other.toDef.lane.name)))
+    end
+  end
+
+  pcall(function ()
+    local filename = TrafficPlannerFeederLogFilename
+    local previous = io.load(filename, '')
+    if #previous > 750000 then previous = previous:sub(-500000) end
+    io.save(filename, previous..table.concat(parts, '\t')..'\n')
+  end)
+end
 
 ---@param intersection TrafficIntersection
 ---@param guide TrafficGuide
@@ -59,6 +107,13 @@ function IntersectionManeuver:initialize(intersection, guide, fromDef, toDef)
   self._impatienceCounter = 0
   self._engagedFor = 0
   self.justFloorIt = false
+  self._feederWaitTime = 0
+  self._feederWaitComplete = not fromDef.lane.feederLane
+  self._roundaboutExitBlocked = false
+  self._feederStoppedFor = 0
+  self._feederLastLogAt = 0
+  self._feederLastLogReason = nil
+  self._feederStopReason = 'approaching'
   self.makingUTurn = curveInfo.curve.fromDir:dot(curveInfo.curve.toDir) < -0.5
   self.curveInfo = curveInfo
   self._minContact = { distance = 1e9 }
@@ -72,6 +127,109 @@ end
 
 function IntersectionManeuver:isRoundaboutFlow()
   return self._roundaboutFlow == true
+end
+
+function IntersectionManeuver:isRoundaboutFeederBlocked()
+  if not self:isRoundaboutFlow() or not self.fromDef.lane.feederLane then return false end
+
+  local entryPos = self.fromDef.fromPos or self.fromDef.fromOrigPos
+  local entryDir = self.curveInfo.curve.fromDir
+  local ownDriver = self.guide:getDriver()
+  local currentSpeed = ownDriver:getSpeedKmh() / 3.6
+  local meta = self.guide:getMeta()
+  local expectedSpeed = meta and meta.speedLimit
+    and math.min(ownDriver.maxSpeed, meta.speedLimit * (0.6 + 0.4 * ownDriver.speedy)) / 3.6 or 0
+  local feederSpeed = math.max(currentSpeed, expectedSpeed, 3)
+  local feederDistanceToOutput = math.max(-self._inCurve, 0) + self.curveInfo.curve.length
+  local feederClearanceTime = feederDistanceToOutput / feederSpeed + 1
+  local function isToRight(pos)
+    return MathUtils.crossY(entryDir, roundaboutRightOffset:set(pos):sub(entryPos)) < 0
+  end
+
+  local engaged = self.inter.engaged
+  for i = 1, engaged.length do
+    local other = engaged[i]
+    if other ~= self and other:isRoundaboutFlow()
+        and isToRight(other.guide:getDriver():getPosRef()) then
+      local pathsConflict = other.toDef == self.toDef or self.curveInfo:intersects(other.curveInfo)
+      local otherSpeed = other.guide:getDriver():getSpeedKmh() / 3.6
+      local otherArrivalTime = otherSpeed > 0.1 and math.max(-other._inCurve, 0) / otherSpeed or 1e9
+      if other.active or pathsConflict and otherArrivalTime <= feederClearanceTime then
+        return true
+      end
+    end
+  end
+
+  local links = self.inter._linksList
+  for i = 1, links.length do
+    local link = links[i]
+    if link.fromPos ~= nil and link.lane.roundabout then
+      local cars = link.lane.orderedCars
+      for j = 1, cars.length do
+        local cursor = cars[j]
+        if cursor.driver ~= ownDriver then
+          local distance = link.lane:distanceToUpcoming(cursor.distance, link.from)
+          local speed = cursor.driver:getSpeedKmh() / 3.6
+          if distance >= 0 and speed > 0.1 and distance / speed <= feederClearanceTime
+              and isToRight(cursor.driver:getPosRef()) then return true end
+        end
+      end
+    end
+  end
+  return false
+end
+
+function IntersectionManeuver:selectSafeRoundaboutExit()
+  if not self:isRoundaboutFlow() or not self.guide:canChange() then return end
+
+  local bestLink, bestCurve, bestClearance = nil, nil, -1
+  local ownDriver = self.guide:getDriver()
+  local meta = self.guide:getMeta()
+  local selectionSpeed = math.max(ownDriver:getSpeedKmh(), meta and meta.speedLimit + 5 or 0)
+  local minimumExitClearance = math.max(10, selectionSpeed / 3.6 * 1.5)
+  local hasPriorityOverFeeders = not self.fromDef.lane.feederLane
+  local links = self.inter._linksList
+  for i = 1, links.length do
+    local candidate = links[i]
+    if candidate.toPos ~= nil
+        and self.inter:areLanesCompatible(self.fromDef.lane, candidate.lane, true) then
+      local candidateCurve = self.inter:getCachingCurve(self.fromDef, candidate)
+      local crossing, reserved = false, false
+      for j = 1, self.inter.engaged.length do
+        local other = self.inter.engaged[j]
+        local otherIsFeeder = other.fromDef.lane.feederLane
+        local feederAhead = other._inCurve > self._inCurve + 0.1
+          or math.abs(other._inCurve - self._inCurve) <= 0.1
+            and other._trajectoryOffsetPriority < self._trajectoryOffsetPriority
+        local ignoreOther = otherIsFeeder and (hasPriorityOverFeeders or not feederAhead)
+        if other ~= self and not ignoreOther then
+          if other.toDef == candidate then reserved = true end
+          if other.fromDef ~= self.fromDef and candidateCurve:intersects(other.curveInfo) then
+            crossing = true
+          end
+        end
+      end
+
+      if not crossing and not reserved then
+        local clearance = candidate.lane:distanceToNextCar(candidate.to,
+          ownDriver.dimensions.front)
+        if clearance >= minimumExitClearance and clearance > bestClearance then
+          bestLink, bestCurve, bestClearance = candidate, candidateCurve, clearance
+        end
+      end
+    end
+  end
+
+  self._roundaboutExitBlocked = bestLink == nil
+  if bestLink ~= nil then
+    if bestLink ~= self.toDef then
+      self.toDef = bestLink
+      self.curveInfo = bestCurve
+      self.makingUTurn = bestCurve.curve.fromDir:dot(bestCurve.curve.toDir) < -0.5
+      self._roundaboutFlow = self.inter.roundabout or self.fromDef.lane.roundabout or bestLink.lane.roundabout
+      self.guide:changeNextTo(bestLink.lane, bestLink.to)
+    end
+  end
 end
 
 function IntersectionManeuver:detach()
@@ -318,6 +476,33 @@ function IntersectionManeuver:advance(speedKmh, dt)
   self._inCurve = _inCurve
   self._engagedFor = self._engagedFor + dt
 
+  if self.fromDef.lane.feederLane and not self.active and speedKmh < 0.5 then
+    self._feederStoppedFor = self._feederStoppedFor + dt
+    local reason = self._feederStopReason or 'unknown'
+    if self._feederStoppedFor >= 3 and (reason ~= self._feederLastLogReason
+        or self._feederStoppedFor - self._feederLastLogAt >= 5) then
+      appendFeederStallLog(self, reason)
+      self._feederLastLogAt = self._feederStoppedFor
+      self._feederLastLogReason = reason
+    end
+  elseif speedKmh >= 0.5 then
+    self._feederStoppedFor = 0
+    self._feederLastLogAt = 0
+    self._feederLastLogReason = nil
+  end
+
+  if self._roundaboutExitBlocked then self:selectSafeRoundaboutExit() end
+
+  if not self._feederWaitComplete then
+    local distanceToHold = -_inCurve - feederHoldback
+    if speedKmh < 0.5 and distanceToHold < 6 then
+      self._feederWaitTime = self._feederWaitTime + dt
+      if self._feederWaitTime >= 0.5 then self._feederWaitComplete = true end
+    elseif speedKmh >= 0.5 then
+      self._feederWaitTime = 0
+    end
+  end
+
   if active or closeToTraverse then
     self._impatienceCounter = self._impatienceCounter + dt
   end
@@ -336,10 +521,11 @@ function IntersectionManeuver:advance(speedKmh, dt)
   end
 
   if not active and closeToTraverse then
-    if self:isRoundaboutFlow() then
+    if self:isRoundaboutFlow() and not self._roundaboutExitBlocked
+        and self._feederWaitComplete and not self:isRoundaboutFeederBlocked() then
       active = true
       self:activate()
-    else
+    elseif not self:isRoundaboutFlow() and self._feederWaitComplete then
       local checkDelay = self._checkDelay - dt
       if checkDelay > 0 then
         self._checkDelay = checkDelay
@@ -412,8 +598,21 @@ end
 ---@return number, CarBase|nil, DistanceTag
 function IntersectionManeuver:distanceToNextCar()
   local roundaboutFlow = self:isRoundaboutFlow()
-  local rd, rc, rt = roundaboutFlow and 1e9 or -self._inCurve, nil,
-    roundaboutFlow and DistanceTags.IntersectionActive or DistanceTags.IntersectionDistanceTo
+  local exitBlocked = not self.active and self._roundaboutExitBlocked
+  local feederMandatoryStop = not self.active and not self._feederWaitComplete
+  local feederBlocked = not self.active and self:isRoundaboutFeederBlocked()
+  local mustWait = exitBlocked or feederMandatoryStop or feederBlocked
+  local freeRoundaboutFlow = roundaboutFlow and not mustWait
+  local distanceToEntry = -self._inCurve - (mustWait and feederHoldback or 0)
+  local rd, rc, rt = freeRoundaboutFlow and 1e9 or distanceToEntry, nil,
+    exitBlocked and DistanceTags.IntersectionRoundaboutExitBlocked
+      or feederMandatoryStop and DistanceTags.IntersectionFeederMandatoryStop
+      or feederBlocked and DistanceTags.IntersectionRoundaboutFeederYield
+      or freeRoundaboutFlow and DistanceTags.IntersectionActive or DistanceTags.IntersectionDistanceTo
+  self._feederStopReason = exitBlocked and 'roundabout-exit-clearance'
+    or feederMandatoryStop and 'mandatory-half-second-stop'
+    or feederBlocked and 'right-side-roundabout-gap'
+    or not self.active and 'intersection-priority-or-conflict' or 'active'
   local justFloorIt = self.justFloorIt
   if justFloorIt and not roundaboutFlow then
     local eng = self.inter.engaged
@@ -431,7 +630,7 @@ function IntersectionManeuver:distanceToNextCar()
 
   if self.closeToTraverse then
     if self.active then
-      rd, rt = roundaboutFlow and 1e9 or 40, DistanceTags.IntersectionActive
+      rd, rt = freeRoundaboutFlow and 1e9 or 40, DistanceTags.IntersectionActive
     end
 
     local _inCurve = self._inCurve
@@ -461,9 +660,10 @@ function IntersectionManeuver:distanceToNextCar()
     local ts = self.inter.traversing
     local tn = ts.length
     local fromSameSide = 0
+    local ignoreFeederTraffic = roundaboutFlow and not self.fromDef.lane.feederLane
     for i = 1, tn do
       local e = ts[i]
-      if e ~= self then
+      if e ~= self and not (ignoreFeederTraffic and e.fromDef.lane.feederLane) then
 
         if not roundaboutFlow and _trajectoryPriority < 0 then
           if e.fromDef.enterSide == self.fromDef.enterSide then

@@ -84,6 +84,7 @@ function TrafficIntersection:engage(guide, currentLane, currentLanePosition, des
   local ret = IntersectionManeuver(self, guide,
     self:findDefFrom(currentLane, currentLanePosition),
     self:findDefTo(desiredLane, desiredLanePosition))
+  ret:selectSafeRoundaboutExit()
   self.engaged:push(ret)
   return ret
 end

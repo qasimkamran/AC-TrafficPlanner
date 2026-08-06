@@ -13,6 +13,9 @@ end
 local json = require('lib/json')
 local genericUtils = require('src/generic_utils')
 local dataFilename = ac.getTrackDataFilename('traffic.json')
+local toolSource = debug.getinfo(1, 'S').source
+local toolDirectory = toolSource:sub(1, 1) == '@' and toolSource:sub(2):match('^(.*[/\\])') or ''
+TrafficPlannerFeederLogFilename = toolDirectory..'logs/feeder_stalls.log'
 
 function ErrorPos(msg, pos)
   DebugShapes[msg] = pos

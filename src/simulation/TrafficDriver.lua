@@ -39,6 +39,7 @@ function TrafficDriver.allocate(carFactory, grid, index)
     maxSpeed = math.huge,
     dimensions = { front = 0.5, rear = 4 },
     _distanceToNext = 0,
+    _roundaboutBoostSpeed = nil,
     _mouseHovered = false,
 
     pos = vec3(),
@@ -233,7 +234,18 @@ end
 
 function TrafficDriver:updateTargetSpeed()
   local meta = self.guide:getMeta()
-  local targetSpeed = self.pauseFor > 0 and 0 or _mmin(self.maxSpeed, meta.speedLimit * (0.6 + 0.4 * self.speedy))
+  local activeRoundabout = self.guide:isActivelyOnRoundabout()
+  if activeRoundabout then
+    if self._roundaboutBoostSpeed == nil then
+      self._roundaboutBoostSpeed = meta.speedLimit + 5
+    end
+  else
+    self._roundaboutBoostSpeed = nil
+  end
+
+  local desiredSpeed = activeRoundabout and self._roundaboutBoostSpeed
+    or meta.speedLimit * (0.6 + 0.4 * self.speedy)
+  local targetSpeed = self.pauseFor > 0 and 0 or _mmin(self.maxSpeed, desiredSpeed)
   local car = self.car
 
   local optimalMargin

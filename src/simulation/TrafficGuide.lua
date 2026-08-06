@@ -64,6 +64,7 @@ function TrafficGuide:advance(speedKmh, dt)
   -- First, as we drive towards an intersection, let’s find it if nothing is set yet
   local _curCursor = self._curCursor
   if _curCursor ~= nil then
+    local currentLane = _curCursor.lane
     if _curCursor:advance(speedKmh, dt) then
       _curCursor = nil
       self._curCursor = nil
@@ -78,17 +79,18 @@ function TrafficGuide:advance(speedKmh, dt)
 
     -- Calculate distance to it
     local distanceToNextLink = self._meta.distanceToNextLink
+    local nextLink = self._meta.nextLink
+    local engagementDistance = nextLink ~= nil and currentLane.feederLane and 60 or 24
 
     -- If nearby, let’s engage with it
-    if distanceToNextLink > 0 and distanceToNextLink < 24 and self._curManeuver == nil then
+    if distanceToNextLink > 0 and distanceToNextLink < engagementDistance and self._curManeuver == nil then
       -- self._nextLane, self._nextLanePos = self.path:next(self._meta.dir)
       self._nextLane, self._nextLanePos = self.path:next(self.driver:getDirRef() or self._meta.dir)
       if self._nextLane == nil then
         return self:detach('No lane to use after maneuver')
       end
 
-      local nextLink = self._meta.nextLink
-      self._curManeuver = nextLink.intersection:engage(self, _curCursor.lane, nextLink.from, self._nextLane, self._nextLanePos)
+      self._curManeuver = nextLink.intersection:engage(self, currentLane, nextLink.from, self._nextLane, self._nextLanePos)
     end
   end
 
@@ -255,6 +257,15 @@ function TrafficGuide:isRoundabout()
   if self._curCursor ~= nil and self._curCursor.lane.roundabout then return true end
   local nextLink = self._meta and self._meta.nextLink or nil
   return nextLink ~= nil and nextLink.intersection.roundabout == true
+end
+
+function TrafficGuide:isActivelyOnRoundabout()
+  local maneuver = self._curManeuver
+  if maneuver ~= nil and maneuver:isRoundaboutFlow() then
+    if not maneuver.active and maneuver.fromDef.lane.feederLane then return false end
+    if maneuver.active then return true end
+  end
+  return self._curCursor ~= nil and self._curCursor.lane.roundabout == true
 end
 
 return class.emmy(TrafficGuide, TrafficGuide.allocate)
