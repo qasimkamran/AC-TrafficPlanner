@@ -48,6 +48,7 @@ function IntersectionManeuver:initialize(intersection, guide, fromDef, toDef)
   self.guide = guide
   self.fromDef = fromDef
   self.toDef = toDef
+  self._roundaboutFlow = intersection.roundabout or fromDef.lane.roundabout or toDef.lane.roundabout
   self._inCurve = -fromDef.lane:distanceToUpcoming(guide:getDistance(), fromDef.from)
   self.active = false
   self.closeToTraverse = false
@@ -67,6 +68,10 @@ function IntersectionManeuver:__tostring()
   return string.format('<IntersectionManeuver: %s, priority=%.2f, phase=%s>', 
     not self.closeToTraverse and 'far' or not self.active and 'waiting' or 'traversing',
     self._trajectoryPriority, self.phase)
+end
+
+function IntersectionManeuver:isRoundaboutFlow()
+  return self._roundaboutFlow == true
 end
 
 function IntersectionManeuver:detach()
@@ -331,14 +336,19 @@ function IntersectionManeuver:advance(speedKmh, dt)
   end
 
   if not active and closeToTraverse then
-    local checkDelay = self._checkDelay - dt
-    if checkDelay > 0 then
-      self._checkDelay = checkDelay
-    elseif self:_checkIfShouldGo(speedKmh, dt) then
+    if self:isRoundaboutFlow() then
       active = true
       self:activate()
     else
-      self._checkDelay = 0.5
+      local checkDelay = self._checkDelay - dt
+      if checkDelay > 0 then
+        self._checkDelay = checkDelay
+      elseif self:_checkIfShouldGo(speedKmh, dt) then
+        active = true
+        self:activate()
+      else
+        self._checkDelay = 0.5
+      end
     end
   end
 
@@ -401,9 +411,11 @@ end
 
 ---@return number, CarBase|nil, DistanceTag
 function IntersectionManeuver:distanceToNextCar()
-  local rd, rc, rt = -self._inCurve, nil, DistanceTags.IntersectionDistanceTo
+  local roundaboutFlow = self:isRoundaboutFlow()
+  local rd, rc, rt = roundaboutFlow and 1e9 or -self._inCurve, nil,
+    roundaboutFlow and DistanceTags.IntersectionActive or DistanceTags.IntersectionDistanceTo
   local justFloorIt = self.justFloorIt
-  if justFloorIt then
+  if justFloorIt and not roundaboutFlow then
     local eng = self.inter.engaged
     for i = 1, #eng do
       local e = eng[i]
@@ -419,7 +431,7 @@ function IntersectionManeuver:distanceToNextCar()
 
   if self.closeToTraverse then
     if self.active then
-      rd, rt = 40, DistanceTags.IntersectionActive
+      rd, rt = roundaboutFlow and 1e9 or 40, DistanceTags.IntersectionActive
     end
 
     local _inCurve = self._inCurve
@@ -453,7 +465,7 @@ function IntersectionManeuver:distanceToNextCar()
       local e = ts[i]
       if e ~= self then
 
-        if _trajectoryPriority < 0 then
+        if not roundaboutFlow and _trajectoryPriority < 0 then
           if e.fromDef.enterSide == self.fromDef.enterSide then
             fromSameSide = fromSameSide + 1
           elseif (e._trajectoryPriority > self._trajectoryPriority or e._trajectoryPriority == self._trajectoryPriority and self._trajectoryOffsetPriority < e._trajectoryOffsetPriority) 
@@ -496,7 +508,7 @@ function IntersectionManeuver:distanceToNextCar()
 
     if self.active then
 
-      if _trajectoryPriority < 0 then
+      if not roundaboutFlow and _trajectoryPriority < 0 then
         if _inCurve > 2.501 and rd > 1.5 then
           self._trajectoryPriority = 0
           local newPhase = self.phase - 1

@@ -17,6 +17,7 @@ local DistanceTags   = require('DistanceTags')
 ---@field speedLimit number
 ---@field allowLaneChanges boolean
 ---@field allowUTurns boolean
+---@field roundabout boolean
 ---@field side vec3
 local _edgeMeta = {}
 
@@ -107,6 +108,7 @@ function TrafficLane:initialize(laneDef)
       speedLimit = laneDef.speedLimit or 90,
       allowLaneChanges = laneDef.params.allowLaneChanges ~= false,
       allowUTurns = laneDef.params.allowUTurns == true,
+      roundabout = self.roundabout,
       side = math.cross(d, vecUp)
     }
   end)
@@ -122,7 +124,8 @@ function TrafficLane:finalize()
     local e = self.edgesMeta[i]
     local n = self.edgesMeta[i % self.size + 1]
     local straight = i > self.size - 2 and not self.loop and 1 or _msaturate(e.dir:dot(n.dir))
-    local speedLimit = math.lerp(math.clamp(math.max(10, e.speedLimit * 0.2), 5, 30), e.speedLimit, straight ^ 2 or 0)
+    local speedLimit = self.roundabout and e.speedLimit
+      or math.lerp(math.clamp(math.max(10, e.speedLimit * 0.2), 5, 30), e.speedLimit, straight ^ 2 or 0)
 
     local distance = self.edgesCubic[i].totalDistance
     local link = self:findClosestIntersectionLink(self.edgesCubic[i].totalDistance)
@@ -130,7 +133,8 @@ function TrafficLane:finalize()
       e.nextLink = link
       local distanceToNextLink = self:distanceToUpcoming(distance, link.from)
       e.distanceToNextLink = distanceToNextLink
-      if distanceToNextLink < 24 and speedLimit > 40 then        
+      if distanceToNextLink < 24 and speedLimit > 40
+          and not self.roundabout and not link.intersection.roundabout then
         local interCloseness = math.lerpInvSat(distanceToNextLink, 24, 8)
         speedLimit = math.lerp(speedLimit, 40, interCloseness)
       end

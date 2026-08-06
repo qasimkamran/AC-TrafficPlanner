@@ -268,8 +268,10 @@ function TrafficDriver:updateTargetSpeed()
   end
 
   if car ~= nil then
-    local turnAmount = math.abs(self.car.turn) * 4
-    targetSpeed = targetSpeed * (1 - turnAmount / (1 + turnAmount))
+    if not self.guide:isRoundabout() then
+      local turnAmount = math.abs(self.car.turn) * 4
+      targetSpeed = targetSpeed * (1 - turnAmount / (1 + turnAmount))
+    end
     car._horizontalOffsetTarget = car._horizontalOffsetBase * meta.spreadMult
   end
 

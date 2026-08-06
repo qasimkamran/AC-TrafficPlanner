@@ -247,4 +247,14 @@ function TrafficGuide:getMeta()
   return self._meta
 end
 
+function TrafficGuide:isRoundabout()
+  local maneuver = self._curManeuver
+  if maneuver ~= nil and maneuver:isRoundaboutFlow() then
+    return true
+  end
+  if self._curCursor ~= nil and self._curCursor.lane.roundabout then return true end
+  local nextLink = self._meta and self._meta.nextLink or nil
+  return nextLink ~= nil and nextLink.intersection.roundabout == true
+end
+
 return class.emmy(TrafficGuide, TrafficGuide.allocate)

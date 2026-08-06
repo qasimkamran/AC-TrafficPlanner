@@ -32,6 +32,9 @@ function ManeuverBase:handlesDistanceToNext() return false end
 function ManeuverBase:handlesDistanceToBlocking() return false end
 
 ---@return boolean
+function ManeuverBase:isRoundaboutFlow() return false end
+
+---@return boolean
 function ManeuverBase:getManeuverType() return ManeuverBase.ManeuverNone end
 
 return ManeuverBase
