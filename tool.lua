@@ -1,6 +1,7 @@
 math.randomseed(1)
 jit.flush()
-ac.setLogSilent(true)
+-- Keep CSP logging enabled: uncaught errors used to be hidden by this tool.
+ac.setLogSilent(false)
 
 if ac.load('newmode.traffic.active') then
   function script.update(dt)
@@ -52,7 +53,32 @@ local simSettings = ac.storage{
 }
 
 local simTraffic, simBroken = nil, false
+local lastCrash = nil
 local simDebugLayers = TrafficDebugLayers(json.decode(simSettings.debugLayers))
+
+local function crashTraceback(err)
+  local message = tostring(err or 'Unknown error')
+  if debug and debug.traceback then
+    return debug.traceback(message, 2)
+  end
+  return message
+end
+
+local function recordCrash(area, err)
+  local crash = string.format('[%s]\n%s', area, tostring(err))
+  if crash ~= lastCrash then
+    lastCrash = crash
+    ac.error('Traffic Planner crashed:\n'..lastCrash)
+  end
+end
+
+local function runProtected(area, callback)
+  local ok, err = xpcall(callback, crashTraceback)
+  if not ok then
+    recordCrash(area, err)
+  end
+  return ok
+end
 
 local function syncTrafficConfig()
   TrafficConfig.debugBehaviour = simSettings.debugBehaviour
@@ -63,6 +89,7 @@ end
 local function trafficRefresh()
   if simTraffic ~= nil then simTraffic:dispose() end
   simTraffic, simBroken = nil, false
+  lastCrash = nil
 end
 
 local function trafficTab()
@@ -173,10 +200,11 @@ local function trafficTab()
   -- ui.dwriteText('Hey there', 24, rgbm.colors.white)
   -- ui.popDWriteFont()
 
-  if simBroken then
-    local errorMsg = 'Sim has crashed'
+  if simBroken or lastCrash then
+    local errorDetails = lastCrash or ac.getLastError() or 'Unknown simulation error'
+    local errorMsg = 'Sim has crashed. Click the error below to copy it.'
     local solutionData = nil
-    if ac.getLastError():match('Not allowed') then
+    if errorDetails:match('Not allowed') then
       errorMsg = 'Can’t run: scripting physics is not allowed. Add in “surfaces.ini”:'
       solutionData = '[SURFACE_0]\
 WAV_PITCH=extended-0\
@@ -186,7 +214,7 @@ ALLOW_NEW_MODE_SCRIPTS=1\
 ALLOW_TOOLS=1'
     end
 
-    if ac.getLastError():match('Models are missing') then
+    if errorDetails:match('Models are missing') then
       errorMsg = 'Can’t run: models are missing. Download models and unpack `data` folder to “extension\\lua\\tools\\csp-traffic-tool”.'
       solutionData = 'https://files.acstuff.ru/shared/IeBU/data.zip'
     end
@@ -194,9 +222,11 @@ ALLOW_TOOLS=1'
     ui.setCursor(vec2(28, 60))
     ui.pushStyleVar(ui.StyleVar.ChildRounding, 8)
     ui.pushStyleColor(ui.StyleColor.ChildBg, rgbm(0.5, 0, 0, 1))
-    ui.childWindow('simErrorMsg', vec2(0, solutionData and 148 or 48), false, 0, function ()
+    ui.childWindow('simErrorMsg', vec2(0, solutionData and 220 or 180), false, 0, function ()
       ui.offsetCursor(8)
       ui.textWrapped(errorMsg, ui.availableSpaceX() - 8)
+      ui.offsetCursorX(8)
+      ui.copyable(errorDetails)
       if solutionData ~= nil then
         ui.offsetCursorX(8)
         if solutionData:startsWith('http') then
@@ -215,6 +245,7 @@ ALLOW_TOOLS=1'
       ui.sameLine()
       if ui.button('Resume') then
         simBroken = false
+        lastCrash = nil
       end
     end)
     ui.popStyleColor()
@@ -226,6 +257,32 @@ end
 
 local simulationTabName = 'Simulation'
 editor.tabs:insert(1, { name = simulationTabName, fn = trafficTab })
+
+local function drawCrashNotice()
+  if not lastCrash or editor.activeTab == simulationTabName then return end
+
+  ui.setCursor(vec2(28, 60))
+  ui.pushStyleVar(ui.StyleVar.ChildRounding, 8)
+  ui.pushStyleColor(ui.StyleColor.ChildBg, rgbm(0.5, 0, 0, 1))
+  ui.childWindow('appErrorMsg', vec2(0, 180), false, 0, function ()
+    ui.offsetCursor(8)
+    ui.textWrapped('Traffic Planner has crashed. Click the error below to copy it.', ui.availableSpaceX() - 8)
+    ui.offsetCursorX(8)
+    ui.copyable(lastCrash)
+    ui.offsetCursorX(8)
+    if ui.button('Restart simulation') then
+      simSettings.simulationSpeed = 1
+      trafficRefresh()
+    end
+    ui.sameLine()
+    if ui.button('Dismiss') then
+      simBroken = false
+      lastCrash = nil
+    end
+  end)
+  ui.popStyleColor()
+  ui.popStyleVar()
+end
 
 -- Tool script
 -- function script.asyncUpdate()
@@ -292,9 +349,13 @@ function script.simUpdate(dt)
 
   if not editor:isEmpty() and simTraffic == nil then
     simBroken = true
-    syncTrafficConfig()
-    -- simTraffic = TrafficSimulation(editor:serializeData())
-    simTraffic = TrafficSimulation(editor:finalizeData())
+    if not runProtected('Simulation initialization', function ()
+      syncTrafficConfig()
+      -- simTraffic = TrafficSimulation(editor:serializeData())
+      simTraffic = TrafficSimulation(editor:finalizeData())
+    end) then
+      return
+    end
     simBroken = false
   end
 
@@ -313,9 +374,11 @@ function script.simUpdate(dt)
 
   if simTraffic ~= nil and not simBroken then
     simBroken = true
-    for _ = 1, math.ceil(simSettings.simulationSpeed) do
-      simTraffic:update(math.saturateN(simSettings.simulationSpeed) * dt)
-    end
+    if not runProtected('Simulation update', function ()
+      for _ = 1, math.ceil(simSettings.simulationSpeed) do
+        simTraffic:update(math.saturateN(simSettings.simulationSpeed) * dt)
+      end
+    end) then return end
     simBroken = false
   end
 
@@ -331,7 +394,8 @@ function script.update(dt)
   end
 
 
-  editor:doUI(dt)
+  runProtected('UI update', function () editor:doUI(dt) end)
+  drawCrashNotice()
 end
 
 -- function update(dt)
@@ -346,27 +410,29 @@ function script.draw3D()
     return
   end
 
-  if script.draw3DOverride then
-    script.draw3DOverride()
-  end
+  runProtected('3D rendering', function ()
+    if script.draw3DOverride then
+      script.draw3DOverride()
+    end
 
-  if simTraffic then
-    simTraffic:drawMain()
-  end
+    if simTraffic then
+      simTraffic:drawMain()
+    end
 
-  if editor.activeTab ~= simulationTabName then
-    render.setDepthMode(render.DepthMode.Off)
-    pcall(function() editor:draw3D() end)
-  elseif simTraffic ~= nil and simSettings.debugLines then
-    simDebugLayers:start()
-    simTraffic:draw3D(simDebugLayers, simSettings.clickToDelete)
+    if editor.activeTab ~= simulationTabName then
+      render.setDepthMode(render.DepthMode.Off)
+      editor:draw3D()
+    elseif simTraffic ~= nil and simSettings.debugLines then
+      simDebugLayers:start()
+      simTraffic:draw3D(simDebugLayers, simSettings.clickToDelete)
 
-    table.forEach(DebugShapes, function (item, key)
-      ac.debug(key, item)
-      render.debugCross(item, 2, rgbm(3, 0, 0, 1))
-      render.debugText(item, key, rgbm(3, 0, 0, 1))
-    end)
-  end
+      table.forEach(DebugShapes, function (item, key)
+        ac.debug(key, item)
+        render.debugCross(item, 2, rgbm(3, 0, 0, 1))
+        render.debugText(item, key, rgbm(3, 0, 0, 1))
+      end)
+    end
+  end)
 
 end
 

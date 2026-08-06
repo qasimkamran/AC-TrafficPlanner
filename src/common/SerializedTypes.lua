@@ -6,6 +6,8 @@
 ---@field ce number @Curve ending parameter.
 ---@field ul number @U-turn length parameter.
 ---@field po number @Priority offset.
+---@field p1 SerializedVec3 @Optional custom control point at the beginning of a projected connection.
+---@field p2 SerializedVec3 @Optional custom control point at the end of a projected connection.
 
 ---@class SerializedTrafficLightEmissiveParams
 ---@field mode integer @1: emissive, 2: virtual meshes, 3: multi-channel emissive.
@@ -24,6 +26,8 @@
 ---@class SerializedLaneProperties
 ---@field allowUTurns boolean
 ---@field allowLaneChanges boolean
+---@field feederLane boolean @Marks a lane as a feeder lane.
+---@field roundabout boolean @Marks a lane as part of a roundabout.
 
 ---@class SerializedLane
 ---@field name string
@@ -40,6 +44,7 @@
 ---@class SerializedIntersection
 ---@field name string
 ---@field id integer
+---@field roundabout boolean @Marks an intersection as a roundabout.
 ---@field points SerializedVec3[]
 ---@field disallowedTrajectories {[1]: LaneID, [2]: LaneID}[]
 ---@field trajectoryAttributes {[1]: LaneID, [2]: LaneID, [3]: SerializedTrajectoryAttributes}[]

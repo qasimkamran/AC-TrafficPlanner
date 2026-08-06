@@ -21,12 +21,14 @@ local _fnFindPoint = function (v, _, j) return j < v.length end
 ---@param lenFrom number
 ---@param lenTo number
 ---@return BezierCurveNormalized
-function BezierCurveNormalized:initialize(posFrom, dirFrom, posTo, dirTo, lenFrom, lenTo)
+function BezierCurveNormalized:initialize(posFrom, dirFrom, posTo, dirTo, lenFrom, lenTo, controlFrom, controlTo)
   if math.isnan(dirFrom.x) then error('Not-a-Number in dirFrom') end
   if math.isnan(posTo.x) then error('Not-a-Number in posTo') end
 
   local curve = _curve
   _curve:set(posFrom, dirFrom, posTo, dirTo, lenFrom, lenTo)
+  if controlFrom then curve.p1:set(controlFrom) end
+  if controlTo then curve.p2:set(controlTo) end
 
   local points = _points
   points[1].pos:set(posFrom)

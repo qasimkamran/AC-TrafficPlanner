@@ -30,6 +30,8 @@ end
 ---@field aabb AABB
 ---@field orderedCars LaneCursor[] @Stores cursors for cars on lane, from one that drove the most to one that just started to drive (highest distance goes first). New cars starting from beginning of the lane are added to the end. It’s important to keep this one sorted.
 ---@field priorityOffset number
+---@field feederLane boolean
+---@field roundabout boolean
 ---@field linkedIntersections IntersectionLink[] @First one is a link with smallest distance.
 ---@field edgesMeta EdgeMeta[]
 local TrafficLane = class('TrafficLane', CubicInterpolatingLane)
@@ -50,6 +52,8 @@ function TrafficLane:initialize(laneDef)
   self.index = lastIndex
   self.id = laneDef.id
   self.name = laneDef.name
+  self.feederLane = laneDef.params.feederLane == true
+  self.roundabout = laneDef.params.roundabout == true
 
   if #laneDef.points < (laneDef.loop and 3 or 2) then
     self.size = 0

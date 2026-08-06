@@ -12,7 +12,7 @@ function EditorTabLanes:initialize(editor)
   self.oldSelection = nil
 end
 
-local minItemHeight = vec2(10, 98)
+local minItemHeight = vec2(10, 118)
 
 ---@param self EditorTabLanes
 ---@param filename string
@@ -220,6 +220,15 @@ function EditorTabLanes:laneItem(lane)
   end
   if ui.itemHovered() then
     ui.setTooltip('Allow changes to nearby lanes running in similar direction')
+  end
+
+  ui.offsetCursorX(30)
+  if ui.checkbox('Feeder lane', _p.feederLane == true) then
+    _p.feederLane, _c = not _p.feederLane, true
+  end
+  ui.sameLine()
+  if ui.checkbox('Roundabout', _p.roundabout == true) then
+    _p.roundabout, _c = not _p.roundabout, true
   end
   
   ui.offsetCursorX(30)

@@ -30,6 +30,7 @@ end
 ---@field _incompatibleTable table<TrafficLane, table<TrafficLane, integer>>
 ---@field _priorityTable table<TrafficLane, table<TrafficLane, boolean>>
 ---@field mergingIntersection boolean
+---@field roundabout boolean
 local TrafficIntersection = class('TrafficIntersection')
 
 function TrafficIntersection:__tostring()
@@ -41,6 +42,7 @@ end
 function TrafficIntersection:initialize(intersectionDef)
   self.id = intersectionDef.id
   self.name = intersectionDef.name
+  self.roundabout = intersectionDef.roundabout == true
   self.shape = FlatPolyShape(intersectionDef.points[1][2], TrafficConfig.intersectionYThreshold,
     intersectionDef.points, function (t) return vec2(t[1], t[3]) end)
 
@@ -244,13 +246,24 @@ function TrafficIntersection:finalizeLinks()
   ---@param id integer
   local function findLaneByID(id)
     local link = self._linksList:findFirst(function (e) return e.lane.id == id end)
-    return link and link.lane or error(string.format('Lane with ID=%d is missing', id))
+    return link and link.lane or nil
+  end
+
+  local function warnMissingTrajectory(kind, fromID, toID)
+    ac.warn(string.format(
+      'Intersection "%s": ignoring stale %s from lane ID=%s to lane ID=%s',
+      self.name or tostring(self._index), kind, tostring(fromID), tostring(toID)))
   end
 
   if self._loadingDef.disallowedTrajectories ~= nil and #self._loadingDef.disallowedTrajectories > 0 then
     for i = 1, #self._loadingDef.disallowedTrajectories do
       local e = self._loadingDef.disallowedTrajectories[i]
-      markLanesIncompatible(findLaneByID(e[1]), findLaneByID(e[2]), 'set via config', 99)
+      local laneFrom, laneTo = findLaneByID(e[1]), findLaneByID(e[2])
+      if laneFrom ~= nil and laneTo ~= nil then
+        markLanesIncompatible(laneFrom, laneTo, 'set via config', 99)
+      else
+        warnMissingTrajectory('disallowed trajectory', e[1], e[2])
+      end
     end
   end
 
@@ -259,10 +272,14 @@ function TrafficIntersection:finalizeLinks()
     for i = 1, #self._loadingDef.trajectoryAttributes do
       local e = self._loadingDef.trajectoryAttributes[i] -- { laneFromID, laneToID, attributes }
       local laneFrom, laneTo = findLaneByID(e[1]), findLaneByID(e[2])
-      local l = table.getOrCreate(self.trajectoryAttributes, laneFrom, function () return {} end)
-      l[laneTo] = e[3]
-      if e[3].po and e[3].po ~= 0 then
-        markLanesPriority(laneFrom, laneTo, 'config', e[3].po)
+      if laneFrom ~= nil and laneTo ~= nil then
+        local l = table.getOrCreate(self.trajectoryAttributes, laneFrom, function () return {} end)
+        l[laneTo] = e[3]
+        if e[3].po and e[3].po ~= 0 then
+          markLanesPriority(laneFrom, laneTo, 'config', e[3].po)
+        end
+      else
+        warnMissingTrajectory('trajectory attributes', e[1], e[2])
       end
     end
   end

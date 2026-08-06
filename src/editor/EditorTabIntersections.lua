@@ -13,7 +13,7 @@ function EditorTabIntersections:initialize(editor)
   self.oldSelection = nil
 end
 
-local minItemHeight = vec2(10, 58)
+local minItemHeight = vec2(10, 78)
 
 function EditorTabIntersections:doUI()
   ui.header('Created intersections')
@@ -89,6 +89,12 @@ function EditorTabIntersections:intersectionItem(inter)
   end
   ui.sameLine()
   ui.text(string.format('Traffic light: %s', inter.trafficLightProgram or 'No'))
+  ui.offsetCursorX(30)
+  if ui.checkbox('Roundabout', inter.roundabout == true) then
+    inter.roundabout = not inter.roundabout
+    inter:recalculate()
+    self.editor:onChange()
+  end
   ui.popFont()
   ui.popID()
   ui.offsetCursorY(8)

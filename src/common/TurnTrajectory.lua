@@ -3,7 +3,9 @@ local BezierCurveNormalized = require('BezierCurveNormalized')
 ---@class TurnBaseTrajectory
 local TurnBaseTrajectory = class('TurnBaseTrajectory', class.Pool)
 function TurnBaseTrajectory:initialize(from, fromDir, to, toDir, params)
-  local bezier = BezierCurveNormalized(from, fromDir, to, toDir, params.cb or 0.5, params.ce or 0.5)
+  local controlFrom = params.p1 and vec3.new(params.p1) or nil
+  local controlTo = params.p2 and vec3.new(params.p2) or nil
+  local bezier = BezierCurveNormalized(from, fromDir, to, toDir, params.cb or 0.5, params.ce or 0.5, controlFrom, controlTo)
   local len = bezier:length()
   self._b = bezier
   self._lengthInv = 1 / len
@@ -37,8 +39,10 @@ function TurnUTurnTrajectory:initialize(from, fromDir, to, toDir, params)
   local halfwayDir = (to - from):scale(1 / halfwayDistance)
   local uTurnSize = params.ul and params.ul * halfwayDistance or (halfwayDistance < 5 and 5 or math.min(4, 0.7 * halfwayDistance))
   local halfway = (to + from):scale(0.5):add((fromDir - toDir):scale(uTurnSize))
-  local b0 = BezierCurveNormalized(from, fromDir, halfway, halfwayDir, params.cb or 0.5, 0.5)
-  local b1 = BezierCurveNormalized(halfway, halfwayDir, to, toDir, 0.5, params.ce or 0.5)
+  local controlFrom = params.p1 and vec3.new(params.p1) or nil
+  local controlTo = params.p2 and vec3.new(params.p2) or nil
+  local b0 = BezierCurveNormalized(from, fromDir, halfway, halfwayDir, params.cb or 0.5, 0.5, controlFrom, nil)
+  local b1 = BezierCurveNormalized(halfway, halfwayDir, to, toDir, 0.5, params.ce or 0.5, nil, controlTo)
   local b0len = b0:length()
   local b1len = b1:length()
   self._b0 = b0

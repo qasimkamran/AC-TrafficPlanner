@@ -77,11 +77,13 @@ function EditorIntersection:initialize(points)
     self.name = "Intersection #" .. lastIndex
     self.id = lastIndex
     self.points = points
+    self.roundabout = false
   else
     -- deserialization
     self.name = points.name
     self.id = points.id or lastIndex
     self.points = Array(points.points, vec3.new)
+    self.roundabout = points.roundabout == true
 
     if points.disallowedTrajectories then
       for i = 1, #points.disallowedTrajectories do
@@ -214,6 +216,7 @@ function EditorIntersection:encode()
   return {
     name = self.name,
     id = self.id,
+    roundabout = self.roundabout == true and true or nil,
     points = self.points:map(function(p) return {p.x, p.y, p.z} end, nil, {}),
     disallowedTrajectories = #_disTr > 0 and _disTr or nil,
     trajectoryAttributes = #_traAt > 0 and _traAt or nil,

@@ -52,6 +52,7 @@ function EditorEditConnections:initialize(editor, int)
 
   self.editor = editor
   self.intersection = int
+  self.controlHelpers = render.PositioningHelper and { render.PositioningHelper(), render.PositioningHelper() } or nil
 
   self.shape = FlatPolyShape(int.points[1].y, 5, int.points, function (t) return vec2(t.x, t.z) end)
   self.enters = Array()
@@ -89,6 +90,12 @@ function EditorEditConnections:initialize(editor, int)
 
   self.draw3D = self.draw3D:bind(self)
   self.editor.onDraw3D:subscribe(self.draw3D)
+end
+
+function EditorEditConnections:selectTrajectory(enter, exit)
+  self.sEnter, self.sExit = enter, exit
+  self.controlPoints = nil
+  self.controlMoving = { false, false }
 end
 
 local _slider = refnumber()
@@ -162,9 +169,9 @@ function EditorEditConnections:trajectoriesGrid()
   self.hEnter, self.hExit = hEnter, hExit
   if hEnter ~= nil and ui.mouseClicked() then
     if self.sEnter == hEnter and self.sExit == hExit then
-      self.sEnter, self.sExit = nil, nil
+      self:selectTrajectory(nil, nil)
     else
-      self.sEnter, self.sExit = hEnter, hExit
+      self:selectTrajectory(hEnter, hExit)
     end
   end
 
@@ -229,18 +236,23 @@ function EditorEditConnections:trajectoryAttributes(conFrom, conTo)
   ui.separator()
 
   if ui.slider('##cb', _slider:set(attributes.cb or 0.5), 0, 2, 'Curvature (start): %.2f') then
-    attributes.cb, changed = _slider.value, true
+    attributes.cb, attributes.p1, changed = _slider.value, nil, true
+    self.controlPoints = nil
   end
 
   if ui.slider('##ce', _slider:set(attributes.ce or 0.5), 0, 2, 'Curvature (end): %.2f') then
-    attributes.ce, changed = _slider.value, true
+    attributes.ce, attributes.p2, changed = _slider.value, nil, true
+    self.controlPoints = nil
   end
 
   if conFrom.dir:dot(conTo.dir) < -0.8 then
     if ui.slider('##ul', _slider:set(attributes.ul or 0.5), 0, 2, 'U-turn (length): %.2f') then
-      attributes.ul, changed = _slider.value, true
+      attributes.ul, attributes.p1, attributes.p2, changed = _slider.value, nil, nil, true
+      self.controlPoints = nil
     end
   end
+
+  ui.textWrapped('Move the two cyan control points in the 3D view to edit this projected connection.')
 
   if changed then
     self.intersection:setTrajectoryAttributes(conFrom.lane, conTo.lane, attributes)
@@ -512,6 +524,59 @@ function EditorEditConnections:drawTrajectory(enter, exit, color)
   class.recycle(trajectory)
 end
 
+local function defaultControlPoints(enter, exit, attributes)
+  local distance = enter.pos:distance(exit.pos)
+  if enter.dir:dot(exit.dir) < -0.8 then
+    local halfwayDistance = distance
+    local uTurnSize = attributes.ul and attributes.ul * halfwayDistance
+      or (halfwayDistance < 5 and 5 or math.min(4, 0.7 * halfwayDistance))
+    local halfway = (exit.pos + enter.pos):scale(0.5):add((enter.dir - exit.dir):scale(uTurnSize))
+    return enter.pos + enter.dir * (enter.pos:distance(halfway) * (attributes.cb or 0.5)),
+      exit.pos - exit.dir * (halfway:distance(exit.pos) * (attributes.ce or 0.5))
+  end
+  return enter.pos + enter.dir * (distance * (attributes.cb or 0.5)),
+    exit.pos - exit.dir * (distance * (attributes.ce or 0.5))
+end
+
+function EditorEditConnections:drawTrajectoryControls()
+  if self.sEnter == nil or self.controlHelpers == nil then return end
+
+  local attributes = self.intersection:getTrajectoryAttributes(self.sEnter.lane, self.sExit.lane) or {}
+  if self.controlPoints == nil then
+    local p1, p2 = defaultControlPoints(self.sEnter, self.sExit, attributes)
+    self.controlPoints = {
+      attributes.p1 and vec3.new(attributes.p1) or p1,
+      attributes.p2 and vec3.new(attributes.p2) or p2
+    }
+  end
+
+  render.debugLine(self.sEnter.pos, self.controlPoints[1], rgbm(0, 3, 3, 1))
+  render.debugLine(self.sExit.pos, self.controlPoints[2], rgbm(0, 3, 3, 1))
+  render.debugCross(self.controlPoints[1], 0.7, rgbm(0, 3, 3, 1))
+  render.debugCross(self.controlPoints[2], 0.7, rgbm(0, 3, 3, 1))
+
+  local ray = nil
+  local rayDistance = nil
+  for i = 1, 2 do
+    local moving = self.controlHelpers[i]:render(self.controlPoints[i])
+    if moving then
+      if render.isPositioningHelperBusy() and self.controlHelpers[i]:movingInScreenSpace() then
+        ray = ray or render.createMouseRay()
+        rayDistance = rayDistance or ray:physics()
+        if rayDistance ~= -1 then
+          self.controlPoints[i]:set(ray.dir * rayDistance + ray.pos)
+        end
+      end
+      attributes['p'..i] = self.controlPoints[i]:table()
+      self.intersection:setTrajectoryAttributes(self.sEnter.lane, self.sExit.lane, attributes)
+      self.controlMoving[i] = true
+    elseif self.controlMoving[i] then
+      self.controlMoving[i] = false
+      self.editor:onChange()
+    end
+  end
+end
+
 function EditorEditConnections:draw3D()
   if self.hEnter ~= nil then
     self:drawTrajectory(self.hEnter, self.hExit, rgbm(0, 0, 0, 1))
@@ -529,6 +594,7 @@ function EditorEditConnections:draw3D()
 
   if self.sEnter ~= nil then
     self:drawTrajectory(self.sEnter, self.sExit, rgbm(0, 3, 3, 1))
+    self:drawTrajectoryControls()
   end
 
   local hEnterOffset = self.hEnterOffset
