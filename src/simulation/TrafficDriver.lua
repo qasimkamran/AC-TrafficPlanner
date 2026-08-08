@@ -10,6 +10,48 @@ local _mmax = math.max
 local _mmin = math.min
 local _initPos = vec3()
 
+local function roundaboutLogValue(value)
+  return tostring(value == nil and '?' or value):gsub('[\r\n\t]', ' ')
+end
+
+local function appendRoundaboutStallLog(driver, reason)
+  if not TrafficPlannerRoundaboutLogFilename then return end
+  local guide = driver.guide
+  if guide == nil then return end
+  local maneuver = guide._curManeuver
+  local cursor = guide._curCursor
+  local inter = maneuver and maneuver.inter or nil
+  local parts = {}
+  local function add(key, value)
+    parts[#parts + 1] = key..'='..roundaboutLogValue(value)
+  end
+
+  add('time', os.date('%Y-%m-%d %H:%M:%S'))
+  add('reason', reason)
+  add('stoppedFor', string.format('%.1f', driver._roundaboutStoppedFor))
+  add('speedKmh', string.format('%.2f', driver.speedKmh))
+  add('targetSpeed', string.format('%.2f', driver._targetSpeed or 0))
+  add('distanceToNext', string.format('%.2f', driver._distanceToNext or 0))
+  add('distanceTag', driver._distanceTag and driver._distanceTag.name or '?')
+  add('lane', cursor and cursor.lane and cursor.lane.name or maneuver and maneuver.fromDef.lane.name or '?')
+  add('intersection', inter and inter.name or '?')
+  add('output', maneuver and maneuver.toDef and maneuver.toDef.lane.name or '?')
+  add('maneuverActive', maneuver and maneuver.active or false)
+  add('inCurve', maneuver and string.format('%.2f', maneuver._inCurve) or '?')
+  add('nextCar', driver._nextCar)
+  add('nextCarSpeed', driver._nextCar and string.format('%.2f', driver._nextCar:getSpeedKmh()) or '?')
+  add('pauseFor', string.format('%.2f', driver.pauseFor or 0))
+  add('engaged', inter and inter.engaged.length or 0)
+  add('traversing', inter and inter.traversing.length or 0)
+
+  pcall(function ()
+    local filename = TrafficPlannerRoundaboutLogFilename
+    local previous = io.load(filename, '')
+    if #previous > 750000 then previous = previous:sub(-500000) end
+    io.save(filename, previous..table.concat(parts, '\t')..'\n')
+  end)
+end
+
 ---@class TrafficDriver
 ---@field guide TrafficGuide
 ---@field car TrafficCar
@@ -40,6 +82,9 @@ function TrafficDriver.allocate(carFactory, grid, index)
     dimensions = { front = 0.5, rear = 4 },
     _distanceToNext = 0,
     _roundaboutBoostSpeed = nil,
+    _roundaboutStoppedFor = 0,
+    _roundaboutLastLogAt = 0,
+    _roundaboutLastLogReason = nil,
     _mouseHovered = false,
 
     pos = vec3(),
@@ -50,6 +95,23 @@ function TrafficDriver.allocate(carFactory, grid, index)
 end
 
 function TrafficDriver:dispose() end
+
+function TrafficDriver:updateRoundaboutStallLog(dt)
+  if self.guide:isActivelyOnRoundabout() and self.speedKmh < 0.5 then
+    self._roundaboutStoppedFor = self._roundaboutStoppedFor + dt
+    local reason = self._distanceTag and self._distanceTag.name or self.pauseFor > 0 and 'paused' or 'unknown'
+    if self._roundaboutStoppedFor >= 3 and (reason ~= self._roundaboutLastLogReason
+        or self._roundaboutStoppedFor - self._roundaboutLastLogAt >= 5) then
+      appendRoundaboutStallLog(self, reason)
+      self._roundaboutLastLogAt = self._roundaboutStoppedFor
+      self._roundaboutLastLogReason = reason
+    end
+  else
+    self._roundaboutStoppedFor = 0
+    self._roundaboutLastLogAt = 0
+    self._roundaboutLastLogReason = nil
+  end
+end
 
 local function _driverUpdateSpeed(self, dt)
   local ts = self._targetSpeed
@@ -216,6 +278,7 @@ function TrafficDriver:update(dt)
   elseif speedKmh > 0 then
     self.speedKmh = 0
   end
+  self:updateRoundaboutStallLog(dt)
   -- self.speedKmh = 0
   -- ac.perfFrameEnd(2090)
 end

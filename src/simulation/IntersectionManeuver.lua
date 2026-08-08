@@ -32,10 +32,21 @@ local IntersectionManeuver = class('IntersectionManeuver', ManeuverBase, class.P
 local lastIndex = 0
 local _mrandom = math.random
 local feederHoldback = 0
-local roundaboutRightOffset = vec3()
+local feederSecondCarSafetyTime = 2
+
+local function estimateAccelerationTravelTime(distance, speedKmh, targetSpeedKmh, initialDelay)
+  local time = initialDelay or 0
+  local step = 0.1
+  while distance > 0 and time < 30 do
+    speedKmh = speedKmh + (targetSpeedKmh - speedKmh) * 0.06
+    distance = distance - math.max(speedKmh, 0) / 3.6 * step
+    time = time + step
+  end
+  return time
+end
 
 local function feederLogValue(value)
-  return tostring(value or '?'):gsub('[\r\n\t]', ' ')
+  return tostring(value == nil and '?' or value):gsub('[\r\n\t]', ' ')
 end
 
 local function appendFeederStallLog(item, reason)
@@ -56,6 +67,9 @@ local function appendFeederStallLog(item, reason)
   add('output', item.toDef.lane.name)
   add('distanceToEntry', string.format('%.2f', math.max(-item._inCurve, 0)))
   add('curveLength', string.format('%.2f', item.curveInfo.curve.length))
+  add('clearanceTime', item._feederClearanceTime and string.format('%.2f', item._feederClearanceTime) or '?')
+  add('trafficLookahead', item._feederTrafficSafetyTime
+    and string.format('%.2f', item._feederTrafficSafetyTime) or '?')
   add('exitClearance', string.format('%.2f', exitClearance))
   add('mandatoryWait', string.format('%.2f', item._feederWaitTime))
   add('exitBlocked', item._roundaboutExitBlocked)
@@ -114,6 +128,8 @@ function IntersectionManeuver:initialize(intersection, guide, fromDef, toDef)
   self._feederLastLogAt = 0
   self._feederLastLogReason = nil
   self._feederStopReason = 'approaching'
+  self._feederClearanceTime = nil
+  self._feederTrafficSafetyTime = nil
   self.makingUTurn = curveInfo.curve.fromDir:dot(curveInfo.curve.toDir) < -0.5
   self.curveInfo = curveInfo
   self._minContact = { distance = 1e9 }
@@ -132,29 +148,39 @@ end
 function IntersectionManeuver:isRoundaboutFeederBlocked()
   if not self:isRoundaboutFlow() or not self.fromDef.lane.feederLane then return false end
 
-  local entryPos = self.fromDef.fromPos or self.fromDef.fromOrigPos
-  local entryDir = self.curveInfo.curve.fromDir
   local ownDriver = self.guide:getDriver()
-  local currentSpeed = ownDriver:getSpeedKmh() / 3.6
   local meta = self.guide:getMeta()
-  local expectedSpeed = meta and meta.speedLimit
-    and math.min(ownDriver.maxSpeed, meta.speedLimit * (0.6 + 0.4 * ownDriver.speedy)) / 3.6 or 0
-  local feederSpeed = math.max(currentSpeed, expectedSpeed, 3)
   local feederDistanceToOutput = math.max(-self._inCurve, 0) + self.curveInfo.curve.length
-  local feederClearanceTime = feederDistanceToOutput / feederSpeed + 1
-  local function isToRight(pos)
-    return MathUtils.crossY(entryDir, roundaboutRightOffset:set(pos):sub(entryPos)) < 0
-  end
-
+  local feederTargetSpeed = meta and meta.speedLimit
+    and math.min(ownDriver.maxSpeed, meta.speedLimit + 5) or ownDriver:getSpeedKmh()
+  local mandatoryWaitLeft = math.max(0, 0.5 - self._feederWaitTime)
+  local feederClearanceTime = estimateAccelerationTravelTime(feederDistanceToOutput,
+    ownDriver:getSpeedKmh(), feederTargetSpeed, mandatoryWaitLeft) + 0.5
+  self._feederClearanceTime = feederClearanceTime
+  -- Do not enter on the tail of the first available gap. Reserve enough
+  -- look-ahead to account for a second circulating car following close behind.
+  local circulatingSafetyTime = feederClearanceTime + feederSecondCarSafetyTime
+  self._feederTrafficSafetyTime = circulatingSafetyTime
   local engaged = self.inter.engaged
   for i = 1, engaged.length do
     local other = engaged[i]
-    if other ~= self and other:isRoundaboutFlow()
-        and isToRight(other.guide:getDriver():getPosRef()) then
+    if other ~= self and other:isRoundaboutFlow() then
       local pathsConflict = other.toDef == self.toDef or self.curveInfo:intersects(other.curveInfo)
-      local otherSpeed = other.guide:getDriver():getSpeedKmh() / 3.6
+      local otherDriver = other.guide:getDriver()
+      local otherMeta = other.guide:getMeta()
+      local otherSpeed = math.max(otherDriver:getSpeedKmh(),
+        otherMeta and otherMeta.speedLimit + 5 or 0) / 3.6
       local otherArrivalTime = otherSpeed > 0.1 and math.max(-other._inCurve, 0) / otherSpeed or 1e9
-      if other.active or pathsConflict and otherArrivalTime <= feederClearanceTime then
+      -- A feeder which is already traversing still needs physical clearance, but
+      -- queued feeders must not grant priority to each other as if they were
+      -- established roundabout traffic. Exit reservations order those cars.
+      local otherIsFeeder = other.fromDef.lane.feederLane
+      -- Curve geometry is authoritative here. On a curved roundabout approach
+      -- a conflicting car can rotate past the entry's instantaneous "right"
+      -- half-plane before reaching the crossing point, which previously let
+      -- feeders at intersections such as #11 enter prematurely.
+      if pathsConflict and (other.active or not otherIsFeeder
+          and otherArrivalTime <= circulatingSafetyTime) then
         return true
       end
     end
@@ -163,15 +189,22 @@ function IntersectionManeuver:isRoundaboutFeederBlocked()
   local links = self.inter._linksList
   for i = 1, links.length do
     local link = links[i]
-    if link.fromPos ~= nil and link.lane.roundabout then
+    -- Some approaches are deliberately marked as both feeder and roundabout.
+    -- Only established, non-feeder lanes have UK roundabout right of way.
+    if link.fromPos ~= nil and link.lane.roundabout
+        and not link.lane.feederLane and link.lane ~= self.fromDef.lane then
       local cars = link.lane.orderedCars
       for j = 1, cars.length do
         local cursor = cars[j]
         if cursor.driver ~= ownDriver then
           local distance = link.lane:distanceToUpcoming(cursor.distance, link.from)
-          local speed = cursor.driver:getSpeedKmh() / 3.6
-          if distance >= 0 and speed > 0.1 and distance / speed <= feederClearanceTime
-              and isToRight(cursor.driver:getPosRef()) then return true end
+          local speed = math.max(cursor.driver:getSpeedKmh(), cursor.edgeMeta.speedLimit + 5) / 3.6
+          -- Any established roundabout approach attached to this intersection
+          -- has priority during the safety window. Engaged maneuvers above add
+          -- exact path filtering; this scan catches the next one or two cars
+          -- before their maneuver has been created.
+          if distance >= 0 and speed > 0.1
+              and distance / speed <= circulatingSafetyTime then return true end
         end
       end
     end
@@ -201,7 +234,8 @@ function IntersectionManeuver:selectSafeRoundaboutExit()
         local feederAhead = other._inCurve > self._inCurve + 0.1
           or math.abs(other._inCurve - self._inCurve) <= 0.1
             and other._trajectoryOffsetPriority < self._trajectoryOffsetPriority
-        local ignoreOther = otherIsFeeder and (hasPriorityOverFeeders or not feederAhead)
+        local ignoreOther = otherIsFeeder and hasPriorityOverFeeders
+          or not other.active and not feederAhead
         if other ~= self and not ignoreOther then
           if other.toDef == candidate then reserved = true end
           if other.fromDef ~= self.fromDef and candidateCurve:intersects(other.curveInfo) then
@@ -491,7 +525,7 @@ function IntersectionManeuver:advance(speedKmh, dt)
     self._feederLastLogReason = nil
   end
 
-  if self._roundaboutExitBlocked then self:selectSafeRoundaboutExit() end
+  if not active and self:isRoundaboutFlow() then self:selectSafeRoundaboutExit() end
 
   if not self._feederWaitComplete then
     local distanceToHold = -_inCurve - feederHoldback
@@ -584,6 +618,7 @@ end
 
 local _refFuturePos = vec3()
 local _futureDirHint = vec3()
+local _relativeTrafficPos = vec3()
 local _needsMinContact = false
 
 ---@param driver TrafficDriver
@@ -598,7 +633,11 @@ end
 ---@return number, CarBase|nil, DistanceTag
 function IntersectionManeuver:distanceToNextCar()
   local roundaboutFlow = self:isRoundaboutFlow()
-  local exitBlocked = not self.active and self._roundaboutExitBlocked
+  -- Exit reservations are an admission gate for feeder traffic. Established
+  -- roundabout traffic keeps its selected route and must not brake to yield to
+  -- a feeder or another tentative reservation at the next intersection.
+  local exitBlocked = not self.active and self.fromDef.lane.feederLane
+    and self._roundaboutExitBlocked
   local feederMandatoryStop = not self.active and not self._feederWaitComplete
   local feederBlocked = not self.active and self:isRoundaboutFeederBlocked()
   local mustWait = exitBlocked or feederMandatoryStop or feederBlocked
@@ -688,7 +727,15 @@ function IntersectionManeuver:distanceToNextCar()
         end
 
         local eDriver = e.guide:getDriver()
-        if eDriver.pos:closerToThan(_refFuturePos, 6) then
+        -- Once a feeder has been admitted it is committed to the roundabout.
+        -- Nearby traffic behind it must not make it hesitate after setting off;
+        -- cars genuinely ahead and output-lane occupancy are still respected.
+        local committedFeeder = self.active and roundaboutFlow and self.fromDef.lane.feederLane
+        local relativeTrafficPos = _relativeTrafficPos:set(eDriver:getPosRef())
+          :sub(self.guide:getDriver():getPosRef())
+        local trafficIsAhead = not committedFeeder
+          or relativeTrafficPos:dot(self.guide:getDriver():getDirRef()) > 0
+        if trafficIsAhead and eDriver.pos:closerToThan(_refFuturePos, 6) then
           local d = _distanceBetween(self.guide:getDriver(), eDriver, _refFuturePos)
           if d < rd then
             rd, rc, rt = d, eDriver:getCar(), e.fromDef == self.fromDef and DistanceTags.IntersectionCarInFront or DistanceTags.IntersectionMergingCarInFront

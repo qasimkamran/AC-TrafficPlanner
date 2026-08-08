@@ -13,7 +13,9 @@ end
 function RaceCarTracker:initialize(index)
   self.car = ac.getCar(index)
   self.trackerPhysics = TrafficContext.trackerPhysics:track(self)
-  self.trackerBlocking = TrafficContext.trackerBlocking:track(self)
+  -- Let traffic follow its normal right-of-way around the player car. Other
+  -- AC cars remain blockers, and the player is still tracked for collisions.
+  self.trackerBlocking = index ~= 0 and TrafficContext.trackerBlocking:track(self) or nil
   CarBase.initialize(self, self.car.transform, self.car.aabbSize.z / 2, self.car.aabbSize.x / 2)
 end
 
@@ -24,7 +26,9 @@ function RaceCarTracker:update()
   -- local pos = vec3(885.27, -1079.05, 1098.78)
   -- DebugShapes.tracker = pos:clone()
   self.trackerPhysics:update(pos)
-  self.trackerBlocking:update(pos)
+  if self.trackerBlocking ~= nil then
+    self.trackerBlocking:update(pos)
+  end
 end
 
 function RaceCarTracker:getSpeedKmh()
